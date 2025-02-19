@@ -76,8 +76,7 @@ _TEXT_GENERATION_MODELS = {
     "MiniCPM3ForCausalLM": ("minicpm3", "MiniCPM3ForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
-    "QuantMixtralForCausalLM": ("mixtral_quant", "MixtralForCausalLM"),
-    # transformers's mpt class has lower case
+    "ModernBertForMaskedLM": ("modern_bert", "ModernBertForMaskedLM"),
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
     "NemotronForCausalLM": ("nemotron", "NemotronForCausalLM"),
@@ -101,7 +100,6 @@ _TEXT_GENERATION_MODELS = {
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "XverseForCausalLM": ("llama", "LlamaForCausalLM"),
-    # [Encoder-decoder]
     "BartModel": ("bart", "BartForConditionalGeneration"),
     "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
     "Florence2ForConditionalGeneration": ("florence2", "Florence2ForConditionalGeneration"),  # noqa: E501

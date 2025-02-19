@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from enum import IntEnum
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Any
 
 import torch
 import torch.nn as nn
@@ -12,7 +12,7 @@ from typing_extensions import assert_never
 from vllm.config import PoolerConfig
 from vllm.model_executor.pooling_metadata import (PoolingMetadata,
                                                   PoolingTensors)
-from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
+from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput, SequenceOutput
 from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
 
@@ -75,11 +75,11 @@ class SimplePooler(nn.Module):
 
     def get_prompt_lens(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: Union[torch.Tensor, Any],
         pooling_metadata: PoolingMetadata,
     ) -> torch.Tensor:
-        return PoolingTensors.from_pooling_metadata(
-            pooling_metadata, hidden_states.device).prompt_lens
+        device = pooling_metadata.device if hasattr(pooling_metadata, 'device') else torch.device('cuda')
+        return PoolingTensors.from_pooling_metadata(pooling_metadata, device).prompt_lens
 
     def extract_states(
         self,
@@ -106,42 +106,61 @@ class CLSPool(SimplePooler):
 
     def extract_states(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: Union[torch.Tensor, Any],
         pooling_metadata: PoolingMetadata,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
         prompt_lens = self.get_prompt_lens(hidden_states, pooling_metadata)
+        data = hidden_states if isinstance(hidden_states, torch.Tensor) else hidden_states.data
 
         first_token_flat_indices = torch.zeros_like(prompt_lens)
         first_token_flat_indices[1:] += torch.cumsum(prompt_lens, dim=0)[:-1]
-        return hidden_states[first_token_flat_indices]
+        return data[first_token_flat_indices]
 
 
 class LastPool(SimplePooler):
 
     def extract_states(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: Union[torch.Tensor, Any],
         pooling_metadata: PoolingMetadata,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
         prompt_lens = self.get_prompt_lens(hidden_states, pooling_metadata)
-
+        
+        # Handle different input types for hidden_states
+        if isinstance(hidden_states, torch.Tensor):
+            data = hidden_states
+        elif isinstance(hidden_states, SequenceOutput):
+            # For single SequenceOutput object, get output_token directly
+            device = pooling_metadata.device if hasattr(pooling_metadata, 'device') else torch.device('cuda')
+            data = hidden_states.output_token.to(device)
+        elif isinstance(hidden_states, (list, tuple)) and len(hidden_states) > 0:
+            # For sequence/list of SequenceOutput objects
+            device = pooling_metadata.device if hasattr(pooling_metadata, 'device') else torch.device('cuda')
+            if isinstance(hidden_states[0], SequenceOutput):
+                data = torch.stack([s.output_token for s in hidden_states]).to(device)
+            else:
+                data = torch.stack(hidden_states).to(device)
+        else:
+            raise ValueError(f"Unsupported hidden_states type: {type(hidden_states)}")
+        
         last_token_flat_indices = torch.cumsum(prompt_lens, dim=0) - 1
-        return hidden_states[last_token_flat_indices]
+        return data[last_token_flat_indices]
 
 
 class AllPool(SimplePooler):
 
     def extract_states(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: Union[torch.Tensor, Any],
         pooling_metadata: PoolingMetadata,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
         prompt_lens = self.get_prompt_lens(hidden_states, pooling_metadata)
+        data = hidden_states if isinstance(hidden_states, torch.Tensor) else hidden_states.data
 
         offset = 0
         pooled_data = list[torch.Tensor]()
         for prompt_len in prompt_lens:
-            pooled_data.append(hidden_states[offset:offset + prompt_len])
+            pooled_data.append(data[offset:offset + prompt_len])
             offset += prompt_len
 
         return pooled_data
@@ -151,19 +170,20 @@ class MeanPool(SimplePooler):
 
     def extract_states(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: Union[torch.Tensor, Any],
         pooling_metadata: PoolingMetadata,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
         prompt_lens = self.get_prompt_lens(hidden_states, pooling_metadata)
+        data = hidden_states if isinstance(hidden_states, torch.Tensor) else hidden_states.data
 
-        cumsum = torch.cumsum(hidden_states, dim=0)
+        cumsum = torch.cumsum(data, dim=0)
         start_indices = torch.cat([
-            torch.tensor([0], device=hidden_states.device),
+            torch.tensor([0], device=data.device),
             torch.cumsum(prompt_lens[:-1], dim=0)
         ])
         end_indices = torch.cumsum(prompt_lens, dim=0)
         return (cumsum[end_indices - 1] - cumsum[start_indices] +
-                hidden_states[start_indices]) / prompt_lens.unsqueeze(1)
+                data[start_indices]) / prompt_lens.unsqueeze(1)
 
 
 class StepPool(SimplePooler):
@@ -183,14 +203,15 @@ class StepPool(SimplePooler):
 
     def extract_states(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: Union[torch.Tensor, Any],
         pooling_metadata: PoolingMetadata,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
         prompt_lens = self.get_prompt_lens(hidden_states, pooling_metadata)
+        data = hidden_states if isinstance(hidden_states, torch.Tensor) else hidden_states.data
 
         returned_token_ids = self.returned_token_ids
         if returned_token_ids is not None and len(returned_token_ids) > 0:
-            hidden_states = hidden_states[:, returned_token_ids]
+            data = data[:, returned_token_ids]
 
         step_tag_id = self.step_tag_id
 
@@ -198,7 +219,7 @@ class StepPool(SimplePooler):
         pooled_data = list[torch.Tensor]()
         for prompt_len, seq_data_i in zip(prompt_lens,
                                           pooling_metadata.seq_data.values()):
-            pooled_data_i = hidden_states[offset:offset + prompt_len]
+            pooled_data_i = data[offset:offset + prompt_len]
             if step_tag_id is not None:
                 token_ids = torch.tensor(seq_data_i.prompt_token_ids)
                 pooled_data_i = pooled_data_i[token_ids == step_tag_id]
